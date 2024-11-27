@@ -5,6 +5,7 @@ import time
 import socket
 import os
 import subprocess
+import platform
 from datetime import datetime
 
 app = Flask(__name__)
@@ -95,12 +96,24 @@ save_lock = threading.Lock()
 
 # Function to ping an IP address
 def ping_ip(ip_address):
+    # Determine the operating system
+    operating_system = platform.system().lower()
+
     try:
-        output = subprocess.check_output(
-            ["ping", "-c", "1", "-W", "1", ip_address],
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-        )
+        if operating_system == "windows":
+            # Windows ping command
+            output = subprocess.check_output(
+                ["ping", "-n", "1", "-w", "1000", ip_address],
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+            )
+        else:
+            # Linux/Unix ping command
+            output = subprocess.check_output(
+                ["ping", "-c", "1", "-W", "1", ip_address],
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+            )
         return True
     except subprocess.CalledProcessError:
         return False
@@ -157,10 +170,17 @@ class MixerCommunicator(threading.Thread):
 
     def receive_midi_messages(self):
         try:
+            buffer = b""
             while self.mixer_connected and self.running:
                 data = self.mixer_socket.recv(1024)
                 if data:
-                    self.process_midi_message(data)
+                    buffer += data
+                    while len(buffer) >= 12:  # Each expected message is 12 bytes long
+                        message = buffer[:12]
+                        buffer = buffer[12:]
+                        print(f"Got MIDI message: {message.hex()}")
+                        self.process_midi_message(message)
+                        print("Processed MIDI message")
                 else:
                     self.mixer_connected = False
                     self.mixer_socket.close()
@@ -172,96 +192,107 @@ class MixerCommunicator(threading.Thread):
             print(f"Mixer connection error: {e}")
 
     def process_midi_message(self, data):
-        # Update last MIDI message
-        internal_state.last_midi_message = data.hex()
-        internal_state.last_midi_message_time = time.time()
-
         midi_msg = list(data)
         N = settings.midi_channel_number
 
-        # Only process messages on the correct MIDI channel
         idx = 0
         while idx < len(midi_msg):
             status_byte = midi_msg[idx]
             midi_channel = status_byte & 0x0F
+
+            # Check if the message is on our MIDI channel
             if midi_channel != N:
                 idx += 1
-                continue  # Not our MIDI channel
-            if (status_byte & 0xF0) == 0xB0:  # Control Change message
-                # Parse Control Change Sequence
-                if midi_msg[idx + 1] == 0x63:  # Parameter Number MSB
-                    MB = midi_msg[idx + 2]
-                    idx += 3
-                    if (
-                        midi_msg[idx] == 0xB0 | N and midi_msg[idx + 1] == 0x62
-                    ):  # Parameter Number LSB
-                        LB = midi_msg[idx + 2]
-                        idx += 3
-                        if midi_msg[idx] == 0xB0 | N:
-                            controller = midi_msg[idx + 1]
-                            value = midi_msg[idx + 2]
-                            idx += 3
+                continue
 
-                            # Find matching configuration
-                            matching_config = None
-                            for mapping in settings.mixer_config:
-                                level_msb = int(mapping["level_msb"], 16)
-                                level_lsb = int(mapping["level_lsb"], 16)
-                                mute_msb = int(mapping["mute_msb"], 16)
-                                mute_lsb = int(mapping["mute_lsb"], 16)
+            # Check if it's a Control Change message
+            if (status_byte & 0xF0) == 0xB0:
+                if idx + 2 < len(midi_msg):
+                    controller = midi_msg[idx + 1]
+                    value = midi_msg[idx + 2]
 
-                                if (MB == level_msb and LB == level_lsb) or (
-                                    MB == mute_msb and LB == mute_lsb
-                                ):
-                                    matching_config = mapping
-                                    break
+                    if controller == 0x63:  # Parameter Number MSB
+                        if idx + 5 < len(midi_msg):
+                            MB = value
+                            if (
+                                midi_msg[idx + 3] == 0xB0 | N
+                                and midi_msg[idx + 4] == 0x62
+                            ):  # Parameter Number LSB
+                                LB = midi_msg[idx + 5]
 
-                            if matching_config:
-                                dsp_channel_name = matching_config["dsp_channel_name"]
-                                if (
-                                    dsp_channel_name
-                                    not in internal_state.dsp_channel_states
-                                ):
-                                    internal_state.dsp_channel_states[
-                                        dsp_channel_name
-                                    ] = {"level_value": None, "mute_state": None}
+                                # Find matching configuration
+                                matching_config, channel_type = (
+                                    self.find_matching_config(MB, LB)
+                                )
 
-                                if controller == 0x06:  # Data Entry MSB
-                                    if MB == int(
-                                        matching_config["level_msb"], 16
-                                    ) and LB == int(matching_config["level_lsb"], 16):
-                                        # Level change
-                                        internal_state.dsp_channel_states[
-                                            dsp_channel_name
-                                        ]["level_value"] = value
-                                        internal_state.schedule_save()
-                                        # If bidirectional and DSP connected, send to DSP
-                                        if (
-                                            settings.bidirectional
-                                            and dsp_communicator.dsp_connected
-                                        ):
-                                            dsp_communicator.send_dsp_message(
-                                                dsp_channel_name, "level", value
-                                            )
-                                    elif MB == int(
-                                        matching_config["mute_msb"], 16
-                                    ) and LB == int(matching_config["mute_lsb"], 16):
-                                        # Mute change
-                                        mute_state = "on" if value == 1 else "off"
-                                        internal_state.dsp_channel_states[
-                                            dsp_channel_name
-                                        ]["mute_state"] = mute_state
-                                        internal_state.schedule_save()
-                                        if (
-                                            settings.bidirectional
-                                            and dsp_communicator.dsp_connected
-                                        ):
-                                            dsp_communicator.send_dsp_message(
-                                                dsp_channel_name, "mute", mute_state
-                                            )
-                                # Ignore controller 0x26 as per specification
-            else:
-                idx += 1  # Move to next byte if not a Control Change message
+                                if matching_config:
+                                    dsp_channel_name = matching_config[
+                                        "dsp_channel_name"
+                                    ]
+
+                                    if channel_type == "level":
+                                        value = midi_msg[idx + 8]
+                                        self.handle_level_change(
+                                            dsp_channel_name, value
+                                        )
+                                    elif channel_type == "mute":
+                                        value = midi_msg[idx + 11]
+                                        self.handle_mute_change(dsp_channel_name, value)
+
+                                idx += 9  # Move past this Control Change sequence
+                                continue
+
+            idx += 1
+
+        # Update last MIDI message info
+        internal_state.last_midi_message = data.hex()
+        internal_state.last_midi_message_time = time.time()
+
+    def find_matching_config(self, MB, LB):
+        for mapping in settings.mixer_config:
+            level_msb = int(mapping["level_msb"], 16)
+            level_lsb = int(mapping["level_lsb"], 16)
+            mute_msb = int(mapping["mute_msb"], 16)
+            mute_lsb = int(mapping["mute_lsb"], 16)
+
+            if (MB == level_msb and LB == level_lsb) or (
+                MB == mute_msb and LB == mute_lsb
+            ):
+                channel_type = (
+                    "level" if (MB == level_msb and LB == level_lsb) else "mute"
+                )
+                return mapping, channel_type
+        return None, None
+
+    def handle_level_change(self, dsp_channel_name, level_value):
+        if dsp_channel_name not in internal_state.dsp_channel_states:
+            internal_state.dsp_channel_states[dsp_channel_name] = {
+                "level_value": None,
+                "mute_state": None,
+            }
+
+        internal_state.dsp_channel_states[dsp_channel_name]["level_value"] = level_value
+        internal_state.schedule_save()
+
+        # If bidirectional and DSP connected, send to DSP
+        if settings.bidirectional and dsp_communicator.dsp_connected:
+            dsp_communicator.send_dsp_message(dsp_channel_name, "level", level_value)
+
+    def handle_mute_change(self, dsp_channel_name, mute_value):
+        if dsp_channel_name not in internal_state.dsp_channel_states:
+            internal_state.dsp_channel_states[dsp_channel_name] = {
+                "level_value": None,
+                "mute_state": None,
+            }
+
+        mute_state = "on" if mute_value == 1 else "off"
+        print(mute_value)
+        internal_state.dsp_channel_states[dsp_channel_name]["mute_state"] = mute_state
+        internal_state.schedule_save()
+
+        # If bidirectional and DSP connected, send to DSP
+        if settings.bidirectional and dsp_communicator.dsp_connected:
+            dsp_communicator.send_dsp_message(dsp_channel_name, "mute", mute_state)
 
     def send_midi_message(self, message_bytes):
         try:
@@ -353,7 +384,7 @@ class DSPCommunicator(threading.Thread):
         try:
             if self.dsp_socket is None:
                 self.dsp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                self.dsp_socket.bind(("", 49184))  # Bind to an available port
+                self.dsp_socket.bind(("", 49152))  # Bind to an available port
                 self.dsp_socket.settimeout(1.0)  # Set timeout for recvfrom
                 # Start a thread to receive messages
                 threading.Thread(target=self.receive_dsp_messages, daemon=True).start()
@@ -391,7 +422,9 @@ class DSPCommunicator(threading.Thread):
     def process_dsp_message(self, data):
         # Parse the data according to DSP protocol
         # Expected message length is 20 bytes
+        print("got dsp message")
         if len(data) == 20:
+            print("20 bytes")
             # Extract XX, YY, ZZ from the message
             XX = data[15]
             YY = data[16]
@@ -526,9 +559,10 @@ class DSPCommunicator(threading.Thread):
         for channel in settings.dsp_config:
             if channel["channel_name"] == dsp_channel_name:
                 if message_type == "level":
+                    value *= 2  # multiply by to go from 0-127 to 0-255
                     XX = int(channel["level_address"], 16)
-                    YY = (value >> 8) & 0xFF
-                    ZZ = value & 0xFF
+                    ZZ = (value >> 8) & 0xFF  # swapped YY and ZZ
+                    YY = value & 0xFF
                 elif message_type == "mute":
                     XX = int(channel["mute_address"], 16)
                     if value == "on":
@@ -542,7 +576,10 @@ class DSPCommunicator(threading.Thread):
             message = header + payload
             # Send message to DSP
             try:
-                self.dsp_socket.sendto(message, (settings.dsp_ip, 49152))
+                self.dsp_socket.sendto(message, (settings.dsp_ip, 49184))
+                print(
+                    f"send {message_type} message to dsp: {message.hex()}, mute state {value}"
+                )
             except Exception as e:
                 print(f"Failed to send DSP message: {e}")
 

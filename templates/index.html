@@ -271,7 +271,7 @@
                 $('#mixer-status').text(data.mixer_status);
                 $('#dsp-status').text(data.dsp_status);
             }).always(function () {
-                setTimeout(updateState, 5000); // Poll every 5 seconds
+                setTimeout(updateState, 500); // Poll every .5 seconds
             });
         }
 
