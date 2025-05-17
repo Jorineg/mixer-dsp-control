@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="UTF-8">
-    <title>Server Configuration</title>
+    <title>DSP Controller</title>
     <!-- Include Bootstrap CSS -->
     <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
     <!-- Optional Bootstrap JS and dependencies -->
@@ -11,17 +11,6 @@
     <!-- We'll use jQuery for simplicity -->
     <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
     <style>
-        /* Highlight MSB and LSB in MIDI message */
-        .highlight-msb {
-            font-weight: bold;
-            color: blue;
-        }
-
-        .highlight-lsb {
-            font-weight: bold;
-            color: red;
-        }
-
         .unknown-channel {
             color: red;
             font-weight: bold;
@@ -35,26 +24,76 @@
         h3 {
             margin-top: 3rem;
         }
+
+        .channel-controls {
+            margin-bottom: 20px;
+            padding: 15px;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            background-color: #f8f9fa;
+        }
+
+        .channel-name {
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+
+        .mute-btn {
+            margin-left: 15px;
+        }
+
+        .mute-on {
+            background-color: #dc3545;
+            border-color: #dc3545;
+        }
+
+        .volume-control {
+            margin-top: 10px;
+        }
+
+        .volume-value {
+            display: inline-block;
+            width: 50px;
+            text-align: center;
+        }
     </style>
 </head>
 
 <body>
     <div class="container mt-5">
-        <h1>Server Configuration</h1>
+        <h1>DSP Controller Configuration</h1>
 
         <!-- Save and Restart Buttons -->
-
-        <button type="button" class="btn btn-warning mt-3" id="restart-device">Restart Device</button>
+        <!-- <button type="button" class="btn btn-warning mt-3" id="restart-device">Restart Device</button> -->
 
         <form method="POST" action="/">
             <!-- Device IPs and Options -->
             <div class="form-group">
-                <label for="mixer_ip">Mixer IP:</label>
-                <input type="text" class="form-control" id="mixer_ip" name="mixer_ip" value="{{ settings.mixer_ip }}">
-            </div>
-            <div class="form-group">
                 <label for="dsp_ip">DSP IP:</label>
                 <input type="text" class="form-control" id="dsp_ip" name="dsp_ip" value="{{ settings.dsp_ip }}">
+            </div>
+
+            <!-- MQTT Settings -->
+            <h3>MQTT Settings</h3>
+            <div class="form-group">
+                <label for="mqtt_broker">MQTT Broker:</label>
+                <input type="text" class="form-control" id="mqtt_broker" name="mqtt_broker"
+                    value="{{ settings.mqtt_broker }}">
+            </div>
+            <div class="form-group">
+                <label for="mqtt_port">MQTT Port:</label>
+                <input type="number" class="form-control" id="mqtt_port" name="mqtt_port"
+                    value="{{ settings.mqtt_port }}">
+            </div>
+            <div class="form-group">
+                <label for="mqtt_username">MQTT Username (optional):</label>
+                <input type="text" class="form-control" id="mqtt_username" name="mqtt_username"
+                    value="{{ settings.mqtt_username }}">
+            </div>
+            <div class="form-group">
+                <label for="mqtt_password">MQTT Password (optional):</label>
+                <input type="password" class="form-control" id="mqtt_password" name="mqtt_password"
+                    value="{{ settings.mqtt_password }}">
             </div>
 
             <div class="form-check">
@@ -63,51 +102,30 @@
                 <label class="form-check-label" for="main_on">Main On</label>
             </div>
             <div class="form-check">
-                <input type="checkbox" class="form-check-input" id="bidirectional" name="bidirectional" {% if
-                    settings.bidirectional %}checked{% endif %}>
-                <label class="form-check-label" for="bidirectional">Bi-directional (update mixer on DSP change)</label>
-            </div>
-            <div class="form-check">
                 <input type="checkbox" class="form-check-input" id="flash_indication" name="flash_indication" {% if
                     settings.flash_indication %}checked{% endif %}>
-                <label class="form-check-label" for="flash_indication">Flash indication on mixer for successful
-                    changes</label>
+                <label class="form-check-label" for="flash_indication">Flash indication for successful changes</label>
             </div>
 
-            <div class="form-group">
-                <label for="midi_channel_number">MIDI Channel Number (0-15):</label>
-                <input type="number" class="form-control" id="midi_channel_number" name="midi_channel_number" min="0"
-                    max="15" value="{{ settings.midi_channel_number }}">
-            </div>
-
-            <!-- Mixer Config Table -->
-            <h3>Mixer Configuration</h3>
-            <table class="table table-bordered" id="mixer-config-table">
+            <!-- MQTT Topics Table -->
+            <h3>MQTT Topics</h3>
+            <table class="table table-bordered" id="mqtt-topics-table">
                 <thead>
                     <tr>
-                        <th>Level MSB</th>
-                        <th>Level LSB</th>
-                        <th>Mute MSB</th>
-                        <th>Mute LSB</th>
-                        <th>DSP Channel Name</th>
+                        <th>Topic Name</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
-                    {% for item in settings.mixer_config %}
+                    {% for topic in settings.mqtt_topics %}
                     <tr>
-                        <td><input type="text" class="form-control" name="level_msb" value="{{ item.level_msb }}"></td>
-                        <td><input type="text" class="form-control" name="level_lsb" value="{{ item.level_lsb }}"></td>
-                        <td><input type="text" class="form-control" name="mute_msb" value="{{ item.mute_msb }}"></td>
-                        <td><input type="text" class="form-control" name="mute_lsb" value="{{ item.mute_lsb }}"></td>
-                        <td><input type="text" class="form-control" name="dsp_channel_name"
-                                value="{{ item.dsp_channel_name }}"></td>
-                        <td><button type="button" class="btn btn-danger btn-sm remove-mixer-row">Remove</button></td>
+                        <td><input type="text" class="form-control" name="topic_name" value="{{ topic }}"></td>
+                        <td><button type="button" class="btn btn-danger btn-sm remove-topic-row">Remove</button></td>
                     </tr>
                     {% endfor %}
                 </tbody>
             </table>
-            <button type="button" class="btn btn-secondary" id="add-mixer-row">Add Row</button>
+            <button type="button" class="btn btn-secondary" id="add-topic-row">Add Topic</button>
 
             <!-- DSP Config Table -->
             <h3>DSP Configuration</h3>
@@ -140,76 +158,124 @@
             </div>
         </form>
 
+        <!-- DSP Channel Controls -->
+        <h3>Channel Controls</h3>
+        <div id="dsp-channel-controls">
+            <!-- Controls will be dynamically added here -->
+        </div>
+
         <!-- Status Display -->
         <h3>Status</h3>
-        <p>Mixer Status: <span id="mixer-status">{{ mixer_status }}</span></p>
+        <p>MQTT Status: <span id="mqtt-status">{{ mqtt_status }}</span></p>
         <p>DSP Status: <span id="dsp-status">{{ dsp_status }}</span></p>
 
-        <!-- Internal State and Last MIDI Message -->
+        <!-- Internal State and Last MQTT Message -->
         <h3>Internal State</h3>
         <pre id="internal-state">{{ internal_state.dsp_channel_states|tojson(indent=2) }}</pre>
 
-        <h3>Last MIDI Message</h3>
-        <p id="last-midi-message"></p>
-        <p>Time since last MIDI message: <span id="time-since-last-midi"></span></p>
-
-        <!-- Link to Mixer MIDI Manual -->
-        <p><a href="{{ url_for('get_manual') }}" target="_blank">MSB/LSB values options here</a></p>
+        <h3>Last MQTT Message</h3>
+        <p id="last-mqtt-message"></p>
+        <p>Time since last MQTT message: <span id="time-since-last-mqtt"></span></p>
     </div>
 
     <!-- JavaScript Code -->
     <script>
-        // Handle Add/Remove Rows in Mixer Config Table
-        $('#add-mixer-row').click(function () {
+        // Handle Add/Remove Rows in MQTT Topics Table
+        $('#add-topic-row').click(function () {
             let newRow = `<tr>
-            <td><input type="text" class="form-control" name="level_msb"></td>
-            <td><input type="text" class="form-control" name="level_lsb"></td>
-            <td><input type="text" class="form-control" name="mute_msb"></td>
-            <td><input type="text" class="form-control" name="mute_lsb"></td>
-            <td><input type="text" class="form-control" name="dsp_channel_name"></td>
-            <td><button type="button" class="btn btn-danger btn-sm remove-mixer-row">Remove</button></td>
-        </tr>`;
-            $('#mixer-config-table tbody').append(newRow);
+                <td><input type="text" class="form-control" name="topic_name"></td>
+                <td><button type="button" class="btn btn-danger btn-sm remove-topic-row">Remove</button></td>
+            </tr>`;
+            $('#mqtt-topics-table tbody').append(newRow);
         });
 
-        $(document).on('click', '.remove-mixer-row', function () {
+        $(document).on('click', '.remove-topic-row', function () {
             $(this).closest('tr').remove();
         });
 
         // Handle Add/Remove Rows in DSP Config Table
         $('#add-dsp-row').click(function () {
             let newRow = `<tr>
-            <td><input type="text" class="form-control" name="channel_name"></td>
-            <td><input type="text" class="form-control" name="level_address"></td>
-            <td><input type="text" class="form-control" name="mute_address"></td>
-            <td><button type="button" class="btn btn-danger btn-sm remove-dsp-row">Remove</button></td>
-        </tr>`;
+                <td><input type="text" class="form-control" name="channel_name"></td>
+                <td><input type="text" class="form-control" name="level_address"></td>
+                <td><input type="text" class="form-control" name="mute_address"></td>
+                <td><button type="button" class="btn btn-danger btn-sm remove-dsp-row">Remove</button></td>
+            </tr>`;
             $('#dsp-config-table tbody').append(newRow);
+
+            // Trigger update of channel controls when config changes
+            updateControlsFromConfig();
         });
 
         $(document).on('click', '.remove-dsp-row', function () {
             $(this).closest('tr').remove();
+
+            // Trigger update of channel controls when config changes
+            updateControlsFromConfig();
         });
+
+        // Also add input handler to update controls when channel name changes
+        $(document).on('change', '#dsp-config-table input[name="channel_name"]', function () {
+            updateControlsFromConfig();
+        });
+
+        // Function to update channel controls from the current config
+        function updateControlsFromConfig() {
+            // Get all configured channel names from the DSP config table
+            let configuredChannels = [];
+            let newChannelsData = {};
+
+            $('#dsp-config-table tbody tr').each(function () {
+                let channelName = $(this).find('input[name="channel_name"]').val();
+                if (channelName) {
+                    configuredChannels.push(channelName);
+
+                    // Initialize state for new channels
+                    if (!internal_state_data[channelName]) {
+                        newChannelsData[channelName] = {
+                            "level_value": 0,
+                            "mute_state": "off"
+                        };
+                    }
+                }
+            });
+
+            // Keep track of current internal state data
+            let internal_state_data = {};
+            try {
+                internal_state_data = JSON.parse($('#internal-state').text() || '{}');
+            } catch (e) {
+                console.error("Failed to parse internal state", e);
+                internal_state_data = {};
+            }
+
+            // Merge in new channels
+            Object.assign(internal_state_data, newChannelsData);
+
+            // Remove channels not in config
+            Object.keys(internal_state_data).forEach(function (channelName) {
+                if (!configuredChannels.includes(channelName)) {
+                    delete internal_state_data[channelName];
+                }
+            });
+
+            // Update the internal state display (temporary visual update)
+            $('#internal-state').text(JSON.stringify(internal_state_data, null, 2));
+
+            // Update controls based on current configured channels
+            updateChannelControls(internal_state_data);
+        }
 
         // Serialize Tables into JSON strings before form submission
         $('form').submit(function (e) {
-            let mixerConfig = [];
-            $('#mixer-config-table tbody tr').each(function () {
-                let levelMsb = $(this).find('input[name="level_msb"]').val();
-                let levelLsb = $(this).find('input[name="level_lsb"]').val();
-                let muteMsb = $(this).find('input[name="mute_msb"]').val();
-                let muteLsb = $(this).find('input[name="mute_lsb"]').val();
-                let dspChannelName = $(this).find('input[name="dsp_channel_name"]').val();
-                if (levelMsb && levelLsb && muteMsb && muteLsb && dspChannelName) {
-                    mixerConfig.push({
-                        'level_msb': levelMsb,
-                        'level_lsb': levelLsb,
-                        'mute_msb': muteMsb,
-                        'mute_lsb': muteLsb,
-                        'dsp_channel_name': dspChannelName
-                    });
+            let mqttTopics = [];
+            $('#mqtt-topics-table tbody tr').each(function () {
+                let topicName = $(this).find('input[name="topic_name"]').val();
+                if (topicName) {
+                    mqttTopics.push(topicName);
                 }
             });
+
             let dspConfig = [];
             $('#dsp-config-table tbody tr').each(function () {
                 let channelName = $(this).find('input[name="channel_name"]').val();
@@ -223,11 +289,13 @@
                     });
                 }
             });
+
             $('<input>').attr({
                 type: 'hidden',
-                name: 'mixer_config',
-                value: JSON.stringify(mixerConfig)
+                name: 'mqtt_topics',
+                value: JSON.stringify(mqttTopics)
             }).appendTo('form');
+
             $('<input>').attr({
                 type: 'hidden',
                 name: 'dsp_config',
@@ -244,108 +312,176 @@
             }
         });
 
-        // Poll /api/state endpoint and update internal state and last MIDI message
+        // Function to create channel controls
+        function createChannelControls(channelName, channelState) {
+            // Default values if state is undefined
+            let levelValue = channelState && channelState.level_value !== null ? channelState.level_value : 0;
+            let muteState = channelState && channelState.mute_state !== null ? channelState.mute_state : 'off';
+
+            // Create control HTML
+            let html = `
+                <div class="channel-controls" data-channel="${channelName}">
+                    <div class="channel-name">
+                        ${channelName}
+                        <button class="btn btn-sm mute-btn ${muteState === 'on' ? 'btn-danger' : 'btn-outline-danger'}" 
+                            onclick="toggleMute('${channelName}')">
+                            ${muteState === 'on' ? 'Unmute' : 'Mute'}
+                        </button>
+                    </div>
+                    <div class="volume-control">
+                        <input type="range" class="form-control-range" 
+                            min="0" max="127" value="${levelValue}" 
+                            oninput="updateVolume('${channelName}', this.value)">
+                        <span class="volume-value">${levelValue}</span>
+                    </div>
+                </div>
+            `;
+
+            return html;
+        }
+
+        // Function to update volume
+        function updateVolume(channelName, value) {
+            // Update the display
+            $(`.channel-controls[data-channel="${channelName}"] .volume-value`).text(value);
+
+            // Send update to server
+            $.post('/api/update_channel', {
+                channel_name: channelName,
+                control_type: 'volume',
+                value: value
+            });
+        }
+
+        // Function to toggle mute
+        function toggleMute(channelName) {
+            // Get current state
+            let btn = $(`.channel-controls[data-channel="${channelName}"] .mute-btn`);
+            let isMuted = btn.hasClass('btn-danger');
+
+            // Update button
+            if (isMuted) {
+                btn.removeClass('btn-danger').addClass('btn-outline-danger');
+                btn.text('Mute');
+            } else {
+                btn.removeClass('btn-outline-danger').addClass('btn-danger');
+                btn.text('Unmute');
+            }
+
+            // Send update to server
+            $.post('/api/update_channel', {
+                channel_name: channelName,
+                control_type: 'mute',
+                value: isMuted ? 'off' : 'on'
+            });
+        }
+
+        // Poll /api/state endpoint and update internal state and last MQTT message
         function updateState() {
             $.getJSON('/api/state', function (data) {
                 // Update internal state display
                 $('#internal-state').text(JSON.stringify(data.dsp_channel_states, null, 2));
 
-                // Update last MIDI message display
-                let midiMessage = data.last_midi_message;
-                if (midiMessage) {
-                    // Highlight MSB and LSB
-                    let highlightedMessage = highlightMidiMessage(midiMessage);
-                    $('#last-midi-message').html(highlightedMessage);
+                // Update last MQTT message display
+                let mqttMessage = data.last_mqtt_message;
+                if (mqttMessage) {
+                    $('#last-mqtt-message').text(mqttMessage);
                 } else {
-                    $('#last-midi-message').text('No MIDI message received yet.');
+                    $('#last-mqtt-message').text('No MQTT message received yet.');
                 }
 
-                // Update time since last MIDI message
-                if (data.time_since_last_midi !== null) {
-                    $('#time-since-last-midi').text(Math.round(data.time_since_last_midi) + ' seconds ago');
+                // Update time since last MQTT message
+                if (data.time_since_last_mqtt !== null) {
+                    $('#time-since-last-mqtt').text(Math.round(data.time_since_last_mqtt) + ' seconds ago');
                 } else {
-                    $('#time-since-last-midi').text('N/A');
+                    $('#time-since-last-mqtt').text('N/A');
                 }
 
-                // Update mixer and DSP statuses
-                $('#mixer-status').text(data.mixer_status);
+                // Update MQTT and DSP statuses
+                $('#mqtt-status').text(data.mqtt_status);
                 $('#dsp-status').text(data.dsp_status);
+
+                // Update channel controls
+                updateChannelControls(data.dsp_channel_states);
             }).always(function () {
                 setTimeout(updateState, 500); // Poll every .5 seconds
             });
         }
 
+        // Function to update channel controls
+        function updateChannelControls(channelStates) {
+            // Get all channel names from the state
+            let channelNames = Object.keys(channelStates);
+
+            // Get all configured channel names from the DSP config
+            let configuredChannels = [];
+            $('#dsp-config-table tbody tr').each(function () {
+                let channelName = $(this).find('input[name="channel_name"]').val();
+                if (channelName) {
+                    configuredChannels.push(channelName);
+                }
+            });
+
+            // First time setup if controls don't exist yet
+            if ($('#dsp-channel-controls').children().length === 0) {
+                let controlsHtml = '';
+                channelNames.forEach(function (channelName) {
+                    // Only create controls for channels in the DSP config
+                    if (configuredChannels.includes(channelName)) {
+                        controlsHtml += createChannelControls(channelName, channelStates[channelName]);
+                    }
+                });
+                $('#dsp-channel-controls').html(controlsHtml);
+            } else {
+                // Update existing controls with current values
+
+                // First, add controls for channels that exist in state and config but don't have UI controls
+                channelNames.forEach(function (channelName) {
+                    // Only proceed if this channel is in the config
+                    if (configuredChannels.includes(channelName)) {
+                        let channelState = channelStates[channelName];
+
+                        // Check if control exists, create if not
+                        if ($(`.channel-controls[data-channel="${channelName}"]`).length === 0) {
+                            $('#dsp-channel-controls').append(createChannelControls(channelName, channelState));
+                        } else {
+                            // Update existing control values if needed
+                            let control = $(`.channel-controls[data-channel="${channelName}"]`);
+                            let volumeSlider = control.find('input[type="range"]');
+                            let volumeValue = control.find('.volume-value');
+                            let muteBtn = control.find('.mute-btn');
+
+                            // Only update if the values have changed
+                            if (channelState.level_value !== null && parseInt(volumeSlider.val()) !== channelState.level_value) {
+                                volumeSlider.val(channelState.level_value);
+                                volumeValue.text(channelState.level_value);
+                            }
+
+                            if (channelState.mute_state !== null) {
+                                if (channelState.mute_state === 'on' && !muteBtn.hasClass('btn-danger')) {
+                                    muteBtn.removeClass('btn-outline-danger').addClass('btn-danger');
+                                    muteBtn.text('Unmute');
+                                } else if (channelState.mute_state === 'off' && muteBtn.hasClass('btn-danger')) {
+                                    muteBtn.removeClass('btn-danger').addClass('btn-outline-danger');
+                                    muteBtn.text('Mute');
+                                }
+                            }
+                        }
+                    }
+                });
+
+                // Remove controls for channels that no longer exist in the config
+                $('.channel-controls').each(function () {
+                    let channelName = $(this).data('channel');
+                    if (!configuredChannels.includes(channelName)) {
+                        $(this).remove();
+                    }
+                });
+            }
+        }
+
         // Start polling
         updateState();
-
-        // Function to highlight MSB and LSB in MIDI message
-        function highlightMidiMessage(hexString) {
-            // Convert hex string to byte array
-            let bytes = hexString.match(/.{1,2}/g);
-            // Assuming MSB and LSB are at specific positions, adjust as necessary
-            let highlightedBytes = [];
-            let msbIndices = []; // Indices where MSB occurs
-            let lsbIndices = []; // Indices where LSB occurs
-
-            // For simplicity, let's assume MSB is after control byte 0x63, and LSB after 0x62
-            for (let i = 0; i < bytes.length; i++) {
-                let byteStr = bytes[i];
-                if (bytes[i - 1] === '63') {
-                    msbIndices.push(i);
-                } else if (bytes[i - 1] === '62') {
-                    lsbIndices.push(i);
-                }
-            }
-
-            for (let i = 0; i < bytes.length; i++) {
-                let byteStr = bytes[i];
-                if (msbIndices.includes(i)) {
-                    highlightedBytes.push('<span class="highlight-msb">' + byteStr + '</span>');
-                } else if (lsbIndices.includes(i)) {
-                    highlightedBytes.push('<span class="highlight-lsb">' + byteStr + '</span>');
-                } else {
-                    highlightedBytes.push(byteStr);
-                }
-            }
-
-            let message = highlightedBytes.join(' ');
-
-            // Check if the message corresponds to a configured DSP channel
-            let isDefinedChannel = isMessageForDefinedChannel(bytes);
-            if (isDefinedChannel) {
-                message += ' <span class="defined-channel">(Defined DSP Channel)</span>';
-            } else {
-                message += ' <span class="unknown-channel">(Undefined Channel)</span>';
-            }
-
-            return message;
-        }
-
-        // Function to check if MIDI message is for a configured DSP channel
-        function isMessageForDefinedChannel(bytes) {
-            // Extract MSB and LSB values
-            let msb = null;
-            let lsb = null;
-            for (let i = 0; i < bytes.length; i++) {
-                if (bytes[i - 1] === '63') {
-                    msb = bytes[i];
-                }
-                if (bytes[i - 1] === '62') {
-                    lsb = bytes[i];
-                }
-            }
-            if (msb !== null && lsb !== null) {
-                // Check against mixer_config
-                let mixerConfig = JSON.parse('{{ settings.mixer_config|tojson }}');
-                for (let i = 0; i < mixerConfig.length; i++) {
-                    let config = mixerConfig[i];
-                    if ((config.level_msb === msb && config.level_lsb === lsb) || (config.mute_msb === msb && config.mute_lsb === lsb)) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
     </script>
 </body>
 

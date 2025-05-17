@@ -6,6 +6,7 @@ import socket
 import os
 import subprocess
 import platform
+import paho.mqtt.client as mqtt
 from datetime import datetime
 
 app = Flask(__name__)
@@ -14,13 +15,14 @@ app = Flask(__name__)
 # Data Structures
 class Settings:
     def __init__(self):
-        self.mixer_ip = "192.168.1.100"
         self.dsp_ip = "192.168.1.101"
+        self.mqtt_broker = "192.168.1.102"
+        self.mqtt_port = 1883
+        self.mqtt_username = ""
+        self.mqtt_password = ""
+        self.mqtt_topics = ["dsp/elki", "dsp/konferenz"]
         self.main_on = True
-        self.bidirectional = True
         self.flash_indication = True
-        self.midi_channel_number = 0  # MIDI channel N (0-15)
-        self.mixer_config = []  # List of dicts with mixer channel mappings
         self.dsp_config = []  # List of dicts with DSP channel configurations
         self.load_settings()
 
@@ -28,34 +30,63 @@ class Settings:
         try:
             with open("settings.json", "r") as f:
                 data = json.load(f)
-                self.mixer_ip = data.get("mixer_ip", self.mixer_ip)
                 self.dsp_ip = data.get("dsp_ip", self.dsp_ip)
+                self.mqtt_broker = data.get("mqtt_broker", self.mqtt_broker)
+                self.mqtt_port = data.get("mqtt_port", self.mqtt_port)
+                self.mqtt_username = data.get("mqtt_username", self.mqtt_username)
+                self.mqtt_password = data.get("mqtt_password", self.mqtt_password)
+                self.mqtt_topics = data.get("mqtt_topics", self.mqtt_topics)
                 self.main_on = data.get("main_on", self.main_on)
-                self.bidirectional = data.get("bidirectional", self.bidirectional)
                 self.flash_indication = data.get(
                     "flash_indication", self.flash_indication
                 )
-                self.midi_channel_number = data.get(
-                    "midi_channel_number", self.midi_channel_number
-                )
-                self.mixer_config = data.get("mixer_config", [])
                 self.dsp_config = data.get("dsp_config", [])
         except FileNotFoundError:
             self.save_settings()
 
     def save_settings(self):
         data = {
-            "mixer_ip": self.mixer_ip,
             "dsp_ip": self.dsp_ip,
+            "mqtt_broker": self.mqtt_broker,
+            "mqtt_port": self.mqtt_port,
+            "mqtt_username": self.mqtt_username,
+            "mqtt_password": self.mqtt_password,
+            "mqtt_topics": self.mqtt_topics,
             "main_on": self.main_on,
-            "bidirectional": self.bidirectional,
             "flash_indication": self.flash_indication,
-            "midi_channel_number": self.midi_channel_number,
-            "mixer_config": self.mixer_config,
             "dsp_config": self.dsp_config,
         }
         with open("settings.json", "w") as f:
             json.dump(data, f, indent=4)
+
+        # Synchronize internal state with the current DSP config
+        self.sync_internal_state_with_config()
+
+    def sync_internal_state_with_config(self):
+        """Synchronize internal state with the current DSP configuration."""
+        # Get all configured channel names
+        configured_channels = set(item["channel_name"] for item in self.dsp_config)
+
+        # Get all channels in internal state
+        state_channels = set(internal_state.dsp_channel_states.keys())
+
+        # Add missing channels to internal state
+        for channel_name in configured_channels:
+            if channel_name not in internal_state.dsp_channel_states:
+                internal_state.dsp_channel_states[channel_name] = {
+                    "level_value": 0,  # Default to 0 volume
+                    "mute_state": "off",  # Default to unmuted
+                }
+
+        # Remove channels from internal state that are no longer in the config
+        channels_to_remove = state_channels - configured_channels
+        for channel_name in channels_to_remove:
+            if channel_name in internal_state.dsp_channel_states:
+                del internal_state.dsp_channel_states[channel_name]
+
+        # Schedule a save of the internal state if any changes were made
+        if configured_channels != state_channels:
+            internal_state.schedule_save()
 
 
 class InternalState:
@@ -63,9 +94,9 @@ class InternalState:
         self.dsp_channel_states = (
             {}
         )  # {channel_name: {'level_value': None, 'mute_state': None}}
-        self.last_midi_message = None
-        self.last_midi_message_time = None
-        self.last_dsp_message_time = None  # Track last DSP message time
+        self.last_mqtt_message = None
+        self.last_mqtt_message_time = None
+        self.last_dsp_message_time = None
         self.internal_state_changed = False
         self.load_state()
 
@@ -120,238 +151,165 @@ def ping_ip(ip_address):
 
 
 # Network Communication Threads
-class MixerCommunicator(threading.Thread):
+class MQTTCommunicator(threading.Thread):
     def __init__(self):
         threading.Thread.__init__(self)
-        self.mixer_connected = False
-        self.mixer_socket = None
+        self.mqtt_connected = False
+        self.mqtt_client = None
         self.running = True
 
     def run(self):
         while self.running:
-            if settings.mixer_ip and settings.main_on:
-                self.connect_to_mixer()
-                if self.mixer_connected:
-                    self.receive_midi_messages()
+            if settings.mqtt_broker and settings.main_on:
+                self.connect_to_mqtt()
+                if self.mqtt_connected:
+                    time.sleep(5)  # Check connection periodically
                 else:
-                    time.sleep(5)
+                    time.sleep(5)  # Retry every 5 seconds
             else:
                 time.sleep(5)
 
-    def connect_to_mixer(self):
+    def connect_to_mqtt(self):
         try:
-            self.mixer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.mixer_socket.connect((settings.mixer_ip, 51325))
-            self.mixer_connected = True
-            # Initiate MIDI transfer by sending a MIDI "note on" to mixer
-            self.send_midi_message(
-                bytes([0x90 | settings.midi_channel_number, 0x00, 0x7F])
-            )  # Example note on message
-            print("Connected to Mixer")
-            # If bidirectional, send internal state to mixer
-            if settings.bidirectional:
-                self.send_internal_state_to_mixer()
+            if self.mqtt_client is None:
+                self.mqtt_client = mqtt.Client(client_id="dsp_controller")
+
+                # Set up callbacks
+                self.mqtt_client.on_connect = self.on_connect
+                self.mqtt_client.on_message = self.on_message
+                self.mqtt_client.on_disconnect = self.on_disconnect
+
+                # Set last will for connection status monitoring
+                self.mqtt_client.will_set("dsp/status", "offline", 0, True)
+
+                # Set credentials if provided
+                if settings.mqtt_username and settings.mqtt_password:
+                    self.mqtt_client.username_pw_set(
+                        settings.mqtt_username, settings.mqtt_password
+                    )
+
+                # Connect with keepalive of 60 seconds
+                self.mqtt_client.connect(settings.mqtt_broker, settings.mqtt_port, 60)
+                self.mqtt_client.loop_start()
+
+            print("Connecting to MQTT broker...")
+
         except Exception as e:
-            self.mixer_connected = False
-            print(f"Failed to connect to Mixer: {e}")
+            self.mqtt_connected = False
+            print(f"Failed to connect to MQTT broker: {e}")
             time.sleep(5)
 
-    def send_internal_state_to_mixer(self):
-        # Send the entire internal state to the mixer as MIDI messages
-        for mapping in settings.mixer_config:
-            dsp_channel_name = mapping["dsp_channel_name"]
-            state = internal_state.dsp_channel_states.get(
-                dsp_channel_name, {"level_value": None, "mute_state": None}
-            )
-            if state["level_value"] is not None:
-                self.send_level_to_mixer(mapping, state["level_value"])
-            if state["mute_state"] is not None:
-                self.send_mute_to_mixer(mapping, state["mute_state"])
+    def on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            self.mqtt_connected = True
+            print(f"Connected to MQTT broker, rc: {rc}")
 
-    def receive_midi_messages(self):
+            # Publish online status
+            client.publish("dsp/status", "online", 0, True)
+
+            # Subscribe to all configured topics
+            for topic in settings.mqtt_topics:
+                client.subscribe(f"{topic}/volume")
+                client.subscribe(f"{topic}/mute")
+            print(f"Subscribed to MQTT topics: {settings.mqtt_topics}")
+        else:
+            self.mqtt_connected = False
+            print(f"Failed to connect to MQTT broker, rc: {rc}")
+
+    def on_disconnect(self, client, userdata, rc):
+        self.mqtt_connected = False
+        print(f"Disconnected from MQTT broker, rc: {rc}")
+
+    def on_message(self, client, userdata, msg):
+        # Process received MQTT message
+        print(f"Received MQTT message: {msg.topic} = {msg.payload.decode()}")
+
         try:
-            buffer = b""
-            while self.mixer_connected and self.running:
-                data = self.mixer_socket.recv(1024)
-                if data:
-                    buffer += data
-                    while len(buffer) >= 12:  # Each expected message is 12 bytes long
-                        message = buffer[:12]
-                        buffer = buffer[12:]
-                        print(f"Got MIDI message: {message.hex()}")
-                        self.process_midi_message(message)
-                        print("Processed MIDI message")
-                else:
-                    self.mixer_connected = False
-                    self.mixer_socket.close()
-                    print("Mixer connection closed")
-                    break
+            # Extract channel and command type from topic
+            topic_parts = msg.topic.split("/")
+            if len(topic_parts) >= 3:
+                channel_name = topic_parts[1]  # e.g., "elki" from "dsp/elki/volume"
+                command_type = topic_parts[2]  # e.g., "volume" or "mute"
+
+                # Process the message based on command type
+                if command_type == "volume":
+                    # Convert payload to level value (0-127)
+                    try:
+                        level_value = int(float(msg.payload.decode()))
+                        # Ensure value is within range
+                        level_value = max(0, min(level_value, 127))
+                        self.handle_level_change(channel_name, level_value)
+                    except ValueError:
+                        print(f"Invalid volume value: {msg.payload.decode()}")
+
+                elif command_type == "mute":
+                    # Convert payload to mute state ("on" or "off")
+                    payload = msg.payload.decode().lower()
+                    if payload in ["on", "true", "1"]:
+                        mute_state = "on"
+                    elif payload in ["off", "false", "0"]:
+                        mute_state = "off"
+                    else:
+                        print(f"Invalid mute value: {payload}")
+                        return
+
+                    self.handle_mute_change(channel_name, mute_state)
+
+            # Update last MQTT message info
+            internal_state.last_mqtt_message = f"{msg.topic}: {msg.payload.decode()}"
+            internal_state.last_mqtt_message_time = time.time()
+
         except Exception as e:
-            self.mixer_connected = False
-            self.mixer_socket.close()
-            print(f"Mixer connection error: {e}")
+            print(f"Error processing MQTT message: {e}")
 
-    def process_midi_message(self, data):
-        midi_msg = list(data)
-        N = settings.midi_channel_number
-
-        idx = 0
-        while idx < len(midi_msg):
-            status_byte = midi_msg[idx]
-            midi_channel = status_byte & 0x0F
-
-            # Check if the message is on our MIDI channel
-            if midi_channel != N:
-                idx += 1
-                continue
-
-            # Check if it's a Control Change message
-            if (status_byte & 0xF0) == 0xB0:
-                if idx + 2 < len(midi_msg):
-                    controller = midi_msg[idx + 1]
-                    value = midi_msg[idx + 2]
-
-                    if controller == 0x63:  # Parameter Number MSB
-                        if idx + 5 < len(midi_msg):
-                            MB = value
-                            if (
-                                midi_msg[idx + 3] == 0xB0 | N
-                                and midi_msg[idx + 4] == 0x62
-                            ):  # Parameter Number LSB
-                                LB = midi_msg[idx + 5]
-
-                                # Find matching configuration
-                                matching_config, channel_type = (
-                                    self.find_matching_config(MB, LB)
-                                )
-
-                                if matching_config:
-                                    dsp_channel_name = matching_config[
-                                        "dsp_channel_name"
-                                    ]
-
-                                    if channel_type == "level":
-                                        value = midi_msg[idx + 8]
-                                        self.handle_level_change(
-                                            dsp_channel_name, value
-                                        )
-                                    elif channel_type == "mute":
-                                        value = midi_msg[idx + 11]
-                                        self.handle_mute_change(dsp_channel_name, value)
-
-                                idx += 9  # Move past this Control Change sequence
-                                continue
-
-            idx += 1
-
-        # Update last MIDI message info
-        internal_state.last_midi_message = data.hex()
-        internal_state.last_midi_message_time = time.time()
-
-    def find_matching_config(self, MB, LB):
-        for mapping in settings.mixer_config:
-            level_msb = int(mapping["level_msb"], 16)
-            level_lsb = int(mapping["level_lsb"], 16)
-            mute_msb = int(mapping["mute_msb"], 16)
-            mute_lsb = int(mapping["mute_lsb"], 16)
-
-            if (MB == level_msb and LB == level_lsb) or (
-                MB == mute_msb and LB == mute_lsb
-            ):
-                channel_type = (
-                    "level" if (MB == level_msb and LB == level_lsb) else "mute"
-                )
-                return mapping, channel_type
-        return None, None
-
-    def handle_level_change(self, dsp_channel_name, level_value):
-        if dsp_channel_name not in internal_state.dsp_channel_states:
-            internal_state.dsp_channel_states[dsp_channel_name] = {
+    def handle_level_change(self, channel_name, level_value):
+        if channel_name not in internal_state.dsp_channel_states:
+            internal_state.dsp_channel_states[channel_name] = {
                 "level_value": None,
                 "mute_state": None,
             }
 
-        internal_state.dsp_channel_states[dsp_channel_name]["level_value"] = level_value
+        internal_state.dsp_channel_states[channel_name]["level_value"] = level_value
         internal_state.schedule_save()
 
-        # If bidirectional and DSP connected, send to DSP
-        if settings.bidirectional and dsp_communicator.dsp_connected:
-            dsp_communicator.send_dsp_message(dsp_channel_name, "level", level_value)
+        # Send to DSP if connected
+        if dsp_communicator.dsp_connected:
+            dsp_communicator.send_dsp_message(channel_name, "level", level_value)
 
-    def handle_mute_change(self, dsp_channel_name, mute_value):
-        if dsp_channel_name not in internal_state.dsp_channel_states:
-            internal_state.dsp_channel_states[dsp_channel_name] = {
+    def handle_mute_change(self, channel_name, mute_state):
+        if channel_name not in internal_state.dsp_channel_states:
+            internal_state.dsp_channel_states[channel_name] = {
                 "level_value": None,
                 "mute_state": None,
             }
 
-        mute_state = "on" if mute_value == 1 else "off"
-        print(mute_value)
-        internal_state.dsp_channel_states[dsp_channel_name]["mute_state"] = mute_state
+        internal_state.dsp_channel_states[channel_name]["mute_state"] = mute_state
         internal_state.schedule_save()
 
-        # If bidirectional and DSP connected, send to DSP
-        if settings.bidirectional and dsp_communicator.dsp_connected:
-            dsp_communicator.send_dsp_message(dsp_channel_name, "mute", mute_state)
+        # Send to DSP if connected
+        if dsp_communicator.dsp_connected:
+            dsp_communicator.send_dsp_message(channel_name, "mute", mute_state)
 
-    def send_midi_message(self, message_bytes):
+    def publish_dsp_state(self, channel_name, state_type, value):
+        """Publish DSP state changes back to MQTT for status reporting"""
+        if not self.mqtt_connected:
+            return
+
         try:
-            self.mixer_socket.sendall(message_bytes)
+            topic = f"dsp/{channel_name}/{state_type}"
+            if state_type == "level":
+                self.mqtt_client.publish(topic, str(value), qos=0, retain=True)
+            elif state_type == "mute":
+                self.mqtt_client.publish(topic, value, qos=0, retain=True)
         except Exception as e:
-            print(f"Failed to send MIDI message: {e}")
-            self.mixer_connected = False
-
-    def send_level_to_mixer(self, mapping, value):
-        N = settings.midi_channel_number
-        MB = int(mapping["level_msb"], 16)
-        LB = int(mapping["level_lsb"], 16)
-        # MIDI message format: BN 63 MB BN 62 LB BN 06 VC BN 26 VF
-        message = bytes(
-            [
-                0xB0 | N,
-                0x63,
-                MB,
-                0xB0 | N,
-                0x62,
-                LB,
-                0xB0 | N,
-                0x06,
-                value,
-                0xB0 | N,
-                0x26,
-                0x00,
-            ]
-        )
-        self.send_midi_message(message)
-
-    def send_mute_to_mixer(self, mapping, mute_state):
-        N = settings.midi_channel_number
-        MB = int(mapping["mute_msb"], 16)
-        LB = int(mapping["mute_lsb"], 16)
-        value = 1 if mute_state == "on" else 0
-        # Mute on/off message: BN 63 MB BN 62 LB BN 06 00 BN 26 VV
-        message = bytes(
-            [
-                0xB0 | N,
-                0x63,
-                MB,
-                0xB0 | N,
-                0x62,
-                LB,
-                0xB0 | N,
-                0x06,
-                0x00,
-                0xB0 | N,
-                0x26,
-                value,
-            ]
-        )
-        self.send_midi_message(message)
+            print(f"Failed to publish to MQTT: {e}")
 
     def stop(self):
         self.running = False
-        if self.mixer_socket:
-            self.mixer_socket.close()
+        if self.mqtt_client:
+            self.mqtt_client.publish("dsp/status", "offline", 0, True)
+            self.mqtt_client.loop_stop()
+            self.mqtt_client.disconnect()
 
 
 class DSPCommunicator(threading.Thread):
@@ -458,19 +416,13 @@ class DSPCommunicator(threading.Thread):
                         "level_value"
                     ] = level_value
                     internal_state.schedule_save()
-                    # Compare with internal state
-                    if previous_value != level_value or previous_value is None:
-                        # If bidirectional and mixer connected, send to mixer
-                        if (
-                            settings.bidirectional
-                            and mixer_communicator.mixer_connected
-                        ):
-                            # Find corresponding mixer mapping
-                            mapping = self.find_mixer_mapping(dsp_channel_name)
-                            if mapping:
-                                mixer_communicator.send_level_to_mixer(
-                                    mapping, level_value
-                                )
+
+                    # Publish state change to MQTT if connected
+                    if mqtt_communicator.mqtt_connected:
+                        mqtt_communicator.publish_dsp_state(
+                            dsp_channel_name, "level", level_value
+                        )
+
                 elif message_type == "mute":
                     mute_state = "on" if (YY, ZZ) == (0xFF, 0xFF) else "off"
                     previous_state = internal_state.dsp_channel_states[
@@ -480,54 +432,15 @@ class DSPCommunicator(threading.Thread):
                         "mute_state"
                     ] = mute_state
                     internal_state.schedule_save()
-                    # Compare with internal state
-                    if previous_state != mute_state or previous_state is None:
-                        # If bidirectional and mixer connected, send to mixer
-                        if (
-                            settings.bidirectional
-                            and mixer_communicator.mixer_connected
-                        ):
-                            mapping = self.find_mixer_mapping(dsp_channel_name)
-                            if mapping:
-                                mixer_communicator.send_mute_to_mixer(
-                                    mapping, mute_state
-                                )
-                # Handle flash indication
-                if settings.flash_indication and settings.main_on:
-                    current_time = time.time()
-                    if current_time - self.last_flash_time > 5:
-                        mapping = self.find_mixer_mapping(dsp_channel_name)
-                        if mapping:
-                            N = settings.midi_channel_number
-                            MB = int(mapping["mute_msb"], 16)
-                            LB = int(mapping["mute_lsb"], 16)
-                            # Mute toggle message: BN 63 MB BN 62 LB BN 60 00
-                            message = bytes(
-                                [
-                                    0xB0 | N,
-                                    0x63,
-                                    MB,
-                                    0xB0 | N,
-                                    0x62,
-                                    LB,
-                                    0xB0 | N,
-                                    0x60,
-                                    0x00,
-                                ]
-                            )
-                            # Send the message twice with 100ms delay
-                            mixer_communicator.send_midi_message(message)
-                            time.sleep(0.1)
-                            mixer_communicator.send_midi_message(message)
-                            self.last_flash_time = current_time
+
+                    # Publish state change to MQTT if connected
+                    if mqtt_communicator.mqtt_connected:
+                        mqtt_communicator.publish_dsp_state(
+                            dsp_channel_name, "mute", mute_state
+                        )
+
         else:
             print(f"Received unexpected DSP message length: {len(data)}")
-
-    def find_mixer_mapping(self, dsp_channel_name):
-        for mapping in settings.mixer_config:
-            if mapping["dsp_channel_name"] == dsp_channel_name:
-                return mapping
-        return None
 
     def send_dsp_message(self, dsp_channel_name, message_type, value):
         # Build the DSP message according to the protocol
@@ -578,7 +491,7 @@ class DSPCommunicator(threading.Thread):
             try:
                 self.dsp_socket.sendto(message, (settings.dsp_ip, 49184))
                 print(
-                    f"send {message_type} message to dsp: {message.hex()}, mute state {value}"
+                    f"send {message_type} message to dsp: {message.hex()}, value {value}"
                 )
             except Exception as e:
                 print(f"Failed to send DSP message: {e}")
@@ -590,9 +503,9 @@ class DSPCommunicator(threading.Thread):
 
 
 # Instantiate communicators
-mixer_communicator = MixerCommunicator()
+mqtt_communicator = MQTTCommunicator()
 dsp_communicator = DSPCommunicator()
-mixer_communicator.start()
+mqtt_communicator.start()
 dsp_communicator.start()
 
 
@@ -617,18 +530,33 @@ state_saver_thread.start()
 def index():
     if request.method == "POST":
         # Handle form submission
-        settings.mixer_ip = request.form.get("mixer_ip", settings.mixer_ip)
         settings.dsp_ip = request.form.get("dsp_ip", settings.dsp_ip)
-        settings.main_on = "main_on" in request.form
-        settings.bidirectional = "bidirectional" in request.form
-        settings.flash_indication = "flash_indication" in request.form
-        settings.midi_channel_number = int(
-            request.form.get("midi_channel_number", settings.midi_channel_number)
+        settings.mqtt_broker = request.form.get("mqtt_broker", settings.mqtt_broker)
+        settings.mqtt_port = int(request.form.get("mqtt_port", settings.mqtt_port))
+        settings.mqtt_username = request.form.get(
+            "mqtt_username", settings.mqtt_username
         )
-        # Handle mixer_config and dsp_config tables
-        settings.mixer_config = json.loads(request.form.get("mixer_config", "[]"))
+        settings.mqtt_password = request.form.get(
+            "mqtt_password", settings.mqtt_password
+        )
+        settings.main_on = "main_on" in request.form
+        settings.flash_indication = "flash_indication" in request.form
+
+        # Handle MQTT topics
+        settings.mqtt_topics = json.loads(request.form.get("mqtt_topics", "[]"))
+
+        # Handle DSP config table
         settings.dsp_config = json.loads(request.form.get("dsp_config", "[]"))
+
         settings.save_settings()
+
+        # Restart MQTT connection with new settings
+        mqtt_communicator.mqtt_connected = False
+        if mqtt_communicator.mqtt_client:
+            mqtt_communicator.mqtt_client.loop_stop()
+            mqtt_communicator.mqtt_client.disconnect()
+        mqtt_communicator.mqtt_client = None
+
         return redirect(url_for("index"))
     else:
         # Render the index page with current settings and state
@@ -636,7 +564,7 @@ def index():
             "index.html",
             settings=settings,
             internal_state=internal_state,
-            mixer_status=get_mixer_status(),
+            mqtt_status=get_mqtt_status(),
             dsp_status=get_dsp_status(),
         )
 
@@ -650,37 +578,108 @@ def restart_device():
 
 @app.route("/api/state")
 def api_state():
-    # Return the internal state and last MIDI message as JSON
-    last_midi_message_time = internal_state.last_midi_message_time
-    if last_midi_message_time:
-        time_since_last_midi = time.time() - last_midi_message_time
+    # Return the internal state and last MQTT message as JSON
+    last_mqtt_message_time = internal_state.last_mqtt_message_time
+    if last_mqtt_message_time:
+        time_since_last_mqtt = time.time() - last_mqtt_message_time
     else:
-        time_since_last_midi = None
+        time_since_last_mqtt = None
     return jsonify(
         {
             "dsp_channel_states": internal_state.dsp_channel_states,
-            "last_midi_message": internal_state.last_midi_message,
-            "time_since_last_midi": time_since_last_midi,
-            "mixer_status": get_mixer_status(),
+            "last_mqtt_message": internal_state.last_mqtt_message,
+            "time_since_last_mqtt": time_since_last_mqtt,
+            "mqtt_status": get_mqtt_status(),
             "dsp_status": get_dsp_status(),
         }
     )
 
 
-@app.route("/manual.pdf")
-def get_manual():
-    return redirect(
-        "https://www.allen-heath.com/content/uploads/2023/11/SQ-MIDI-Protocol-Issue5.pdf"
-    )
+@app.route("/api/update_channel", methods=["POST"])
+def update_channel():
+    """Handle channel updates from the web interface"""
+    try:
+        channel_name = request.form.get("channel_name")
+        control_type = request.form.get("control_type")
+        value = request.form.get("value")
+
+        if not channel_name or not control_type or value is None:
+            return (
+                jsonify({"status": "error", "message": "Missing required parameters"}),
+                400,
+            )
+
+        # Initialize channel state if it doesn't exist
+        if channel_name not in internal_state.dsp_channel_states:
+            internal_state.dsp_channel_states[channel_name] = {
+                "level_value": None,
+                "mute_state": None,
+            }
+
+        # Update internal state based on control type
+        if control_type == "volume":
+            try:
+                level_value = int(float(value))
+                # Ensure value is within range
+                level_value = max(0, min(level_value, 127))
+                internal_state.dsp_channel_states[channel_name][
+                    "level_value"
+                ] = level_value
+                internal_state.schedule_save()
+
+                # Send to DSP if connected
+                if dsp_communicator.dsp_connected:
+                    dsp_communicator.send_dsp_message(
+                        channel_name, "level", level_value
+                    )
+
+                # Publish to MQTT if connected
+                if mqtt_communicator.mqtt_connected:
+                    mqtt_communicator.publish_dsp_state(
+                        channel_name, "level", level_value
+                    )
+
+                return jsonify({"status": "success"})
+            except ValueError:
+                return (
+                    jsonify({"status": "error", "message": "Invalid volume value"}),
+                    400,
+                )
+
+        elif control_type == "mute":
+            if value in ["on", "off"]:
+                internal_state.dsp_channel_states[channel_name]["mute_state"] = value
+                internal_state.schedule_save()
+
+                # Send to DSP if connected
+                if dsp_communicator.dsp_connected:
+                    dsp_communicator.send_dsp_message(channel_name, "mute", value)
+
+                # Publish to MQTT if connected
+                if mqtt_communicator.mqtt_connected:
+                    mqtt_communicator.publish_dsp_state(channel_name, "mute", value)
+
+                return jsonify({"status": "success"})
+            else:
+                return (
+                    jsonify({"status": "error", "message": "Invalid mute value"}),
+                    400,
+                )
+
+        else:
+            return jsonify({"status": "error", "message": "Invalid control type"}), 400
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
-def get_mixer_status():
-    if mixer_communicator.mixer_connected:
+def get_mqtt_status():
+    if mqtt_communicator.mqtt_connected:
         if (
-            internal_state.last_midi_message_time
-            and time.time() - internal_state.last_midi_message_time < 60
+            internal_state.last_mqtt_message_time
+            and time.time() - internal_state.last_mqtt_message_time < 60
         ):
-            return "connected (receiving midi)"
+            return "connected (receiving messages)"
         else:
             return "connected (no data)"
     else:
