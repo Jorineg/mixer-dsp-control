@@ -101,10 +101,14 @@
                     %}checked{% endif %}>
                 <label class="form-check-label" for="main_on">Main On</label>
             </div>
-            <div class="form-check">
-                <input type="checkbox" class="form-check-input" id="flash_indication" name="flash_indication" {% if
-                    settings.flash_indication %}checked{% endif %}>
-                <label class="form-check-label" for="flash_indication">Flash indication for successful changes</label>
+
+            <!-- Volume Step Size Form Group -->
+            <div class="form-group mt-3">
+                <label for="volume_step_size">Volume Step Size (1-20):</label>
+                <input type="number" class="form-control" id="volume_step_size" name="volume_step_size" min="1" max="20"
+                    value="{{ settings.volume_step_size }}">
+                <small class="form-text text-muted">Amount to change volume when using "up" or "down" commands via
+                    MQTT</small>
             </div>
 
             <!-- MQTT Topics Table -->
@@ -160,6 +164,25 @@
 
         <!-- DSP Channel Controls -->
         <h3>Channel Controls</h3>
+        <div class="alert alert-info">
+            <h5>MQTT Command Reference:</h5>
+            <ul>
+                <li><strong>Volume Control:</strong>
+                    <ul>
+                        <li>Set absolute value (0-127): <code>dsp/[channel]/volume</code> with payload <code>75</code>
+                        </li>
+                        <li>Increase by step: <code>dsp/[channel]/volume</code> with payload <code>up</code></li>
+                        <li>Decrease by step: <code>dsp/[channel]/volume</code> with payload <code>down</code></li>
+                    </ul>
+                </li>
+                <li><strong>Mute Control:</strong>
+                    <ul>
+                        <li>Mute: <code>dsp/[channel]/mute</code> with payload <code>on</code></li>
+                        <li>Unmute: <code>dsp/[channel]/mute</code> with payload <code>off</code></li>
+                    </ul>
+                </li>
+            </ul>
+        </div>
         <div id="dsp-channel-controls">
             <!-- Controls will be dynamically added here -->
         </div>
@@ -329,10 +352,18 @@
                         </button>
                     </div>
                     <div class="volume-control">
-                        <input type="range" class="form-control-range" 
-                            min="0" max="127" value="${levelValue}" 
-                            oninput="updateVolume('${channelName}', this.value)">
-                        <span class="volume-value">${levelValue}</span>
+                        <div class="d-flex align-items-center">
+                            <button class="btn btn-sm btn-outline-secondary mr-2" 
+                                onclick="decrementVolume('${channelName}')">-</button>
+                            <div class="flex-grow-1">
+                                <input type="range" class="form-control-range" 
+                                    min="0" max="127" value="${levelValue}" 
+                                    oninput="updateVolume('${channelName}', this.value)">
+                            </div>
+                            <button class="btn btn-sm btn-outline-secondary ml-2" 
+                                onclick="incrementVolume('${channelName}')">+</button>
+                            <span class="volume-value ml-2">${levelValue}</span>
+                        </div>
                     </div>
                 </div>
             `;
@@ -351,6 +382,30 @@
                 control_type: 'volume',
                 value: value
             });
+        }
+
+        // Function to increment volume
+        function incrementVolume(channelName) {
+            const slider = $(`.channel-controls[data-channel="${channelName}"] input[type="range"]`);
+            const stepSize = parseInt($('#volume_step_size').val() || 5);
+            const currentValue = parseInt(slider.val());
+            const newValue = Math.min(127, currentValue + stepSize);
+
+            // Update slider and display
+            slider.val(newValue);
+            updateVolume(channelName, newValue);
+        }
+
+        // Function to decrement volume
+        function decrementVolume(channelName) {
+            const slider = $(`.channel-controls[data-channel="${channelName}"] input[type="range"]`);
+            const stepSize = parseInt($('#volume_step_size').val() || 5);
+            const currentValue = parseInt(slider.val());
+            const newValue = Math.max(0, currentValue - stepSize);
+
+            // Update slider and display
+            slider.val(newValue);
+            updateVolume(channelName, newValue);
         }
 
         // Function to toggle mute

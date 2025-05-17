@@ -22,7 +22,7 @@ class Settings:
         self.mqtt_password = ""
         self.mqtt_topics = ["dsp/elki", "dsp/konferenz"]
         self.main_on = True
-        self.flash_indication = True
+        self.volume_step_size = 5  # Default step size for volume up/down
         self.dsp_config = []  # List of dicts with DSP channel configurations
         self.load_settings()
 
@@ -37,8 +37,8 @@ class Settings:
                 self.mqtt_password = data.get("mqtt_password", self.mqtt_password)
                 self.mqtt_topics = data.get("mqtt_topics", self.mqtt_topics)
                 self.main_on = data.get("main_on", self.main_on)
-                self.flash_indication = data.get(
-                    "flash_indication", self.flash_indication
+                self.volume_step_size = data.get(
+                    "volume_step_size", self.volume_step_size
                 )
                 self.dsp_config = data.get("dsp_config", [])
         except FileNotFoundError:
@@ -53,7 +53,7 @@ class Settings:
             "mqtt_password": self.mqtt_password,
             "mqtt_topics": self.mqtt_topics,
             "main_on": self.main_on,
-            "flash_indication": self.flash_indication,
+            "volume_step_size": self.volume_step_size,
             "dsp_config": self.dsp_config,
         }
         with open("settings.json", "w") as f:
@@ -233,14 +233,36 @@ class MQTTCommunicator(threading.Thread):
 
                 # Process the message based on command type
                 if command_type == "volume":
-                    # Convert payload to level value (0-127)
-                    try:
-                        level_value = int(float(msg.payload.decode()))
-                        # Ensure value is within range
-                        level_value = max(0, min(level_value, 127))
-                        self.handle_level_change(channel_name, level_value)
-                    except ValueError:
-                        print(f"Invalid volume value: {msg.payload.decode()}")
+                    # Get the current level value
+                    current_level = 0
+                    if channel_name in internal_state.dsp_channel_states:
+                        current_level = (
+                            internal_state.dsp_channel_states[channel_name].get(
+                                "level_value", 0
+                            )
+                            or 0
+                        )
+
+                    payload = msg.payload.decode().lower()
+
+                    # Handle relative volume changes (up/down)
+                    if payload == "up":
+                        # Increase volume by step size
+                        new_level = min(127, current_level + settings.volume_step_size)
+                        self.handle_level_change(channel_name, new_level)
+                    elif payload == "down":
+                        # Decrease volume by step size
+                        new_level = max(0, current_level - settings.volume_step_size)
+                        self.handle_level_change(channel_name, new_level)
+                    else:
+                        # Convert payload to level value (0-127)
+                        try:
+                            level_value = int(float(payload))
+                            # Ensure value is within range
+                            level_value = max(0, min(level_value, 127))
+                            self.handle_level_change(channel_name, level_value)
+                        except ValueError:
+                            print(f"Invalid volume value: {payload}")
 
                 elif command_type == "mute":
                     # Convert payload to mute state ("on" or "off")
@@ -540,7 +562,17 @@ def index():
             "mqtt_password", settings.mqtt_password
         )
         settings.main_on = "main_on" in request.form
-        settings.flash_indication = "flash_indication" in request.form
+
+        # Handle volume step size
+        try:
+            volume_step = int(
+                request.form.get("volume_step_size", settings.volume_step_size)
+            )
+            settings.volume_step_size = max(
+                1, min(volume_step, 20)
+            )  # Limit between 1 and 20
+        except ValueError:
+            pass  # Keep current value on error
 
         # Handle MQTT topics
         settings.mqtt_topics = json.loads(request.form.get("mqtt_topics", "[]"))
